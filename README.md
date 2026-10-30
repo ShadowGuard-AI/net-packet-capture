@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # net-packet-capture
 Captures network packets for a specific interface and filters them based on user-defined criteria (e.g., port, protocol, IP address). Outputs the captured packets in PCAP format. - Focused on Basic network operations
 
