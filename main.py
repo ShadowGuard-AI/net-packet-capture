@@ -47,11 +47,13 @@ def capture_packets(interface, output_file, port=None, protocol=None, source_ip=
     """
     try:
         # Create a PCAP dumper to write the packets to a file.
+        # I create the output file before opening the live device, so the dumper already exists for the finally block if open_live then fails. The cost is a valid but empty pcap left behind on a run that never captured anything.
         pcap_dumper = pcapy.open_dead(1500, dpkt.datalink.DLT_EN10MB) # DLT_EN10MB = Ethernet
         dumper = pcap_dumper.dump_open(output_file)
 
         # Open the live capture
         cap = pcapy.open_live(interface, 65536, promisc, timeout)
+        # The snap length is the full 65536, not the 1500 used for the dead handle. Truncating at capture time would throw away the payloads a reader opens this file for, and nothing later can get them back.
 
         packet_count = 0
 
@@ -62,6 +64,7 @@ def capture_packets(interface, output_file, port=None, protocol=None, source_ip=
                 eth = dpkt.ethernet.Ethernet(data)
 
                 # Filter by IP, if it's not an IP packet skip filtering and store
+                # Non-IP frames are still saved unless a port filter is set. That surprises people, but ARP and other link traffic is part of what happened on the wire, and dropping it by default would make the file look cleaner than the capture was.
                 if not isinstance(eth.data, dpkt.ip.IP):
                     logging.debug("Non-IP Packet, Skipping IP-based filters")
 
@@ -93,6 +96,7 @@ def capture_packets(interface, output_file, port=None, protocol=None, source_ip=
                         return
                     elif proto_lower == "icmp" and not isinstance(ip.data, dpkt.icmp.ICMP):
                         return
+                    # Notice this else binds to the icmp test, not to all three. A tcp filter on a UDP packet falls into the second branch and returns, while an unknown protocol name matches none of them and lands here, logging and then saving the packet anyway. That loose handling is why validate_args only warns about odd protocol names.
                     else: # User specified protocol but it does not match
                         logging.debug("Packet Protocol: %s, Filter Protocol: %s", type(ip.data).__name__, protocol)
 
@@ -100,6 +104,7 @@ def capture_packets(interface, output_file, port=None, protocol=None, source_ip=
                 # Filter by port
                 if port:
                     if isinstance(ip.data, dpkt.tcp.TCP):
+                        # I match either direction. A capture filtered to port 443 should show the replies as well as the requests, and matching only the destination would give a one sided conversation.
                         if ip.data.sport != port and ip.data.dport != port:
                             return
                     elif isinstance(ip.data, dpkt.udp.UDP):
@@ -115,6 +120,7 @@ def capture_packets(interface, output_file, port=None, protocol=None, source_ip=
 
                 if packet_number > 0 and packet_count >= packet_number:
                     logging.info(f"Captured {packet_count} packets. Stopping capture.")
+                    # Raising SystemExit inside the handler is how a counted capture stops: cap.loop has no clean stop call I can use from here. The outer function does not catch SystemExit, so a finished count exits as success instead of being logged as an error.
                     sys.exit(0)
 
             except Exception as e:
@@ -135,6 +141,7 @@ def capture_packets(interface, output_file, port=None, protocol=None, source_ip=
         if destination_ip:
             logging.info(f"Filtering by Destination IP: {destination_ip}")
 
+        # A bad packet cannot kill the capture. The handler catches its own exceptions and only logs them, so one frame dpkt cannot parse costs that frame, not the whole run.
         cap.loop(0, packet_handler)  # 0 means loop forever until interrupted
 
     except pcapy.PcapError as e:
@@ -145,6 +152,7 @@ def capture_packets(interface, output_file, port=None, protocol=None, source_ip=
         sys.exit(1)
     finally:
         try:
+            # This finally block has to tolerate the dumper never existing. If open_dead itself failed, the name is unbound and the bare except below is what keeps that first error from being buried under a second one.
             dumper.close() # Close the pcap file writer.
         except:
             pass # Already closed, or never opened
